@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EPUB 轉 PDF 神器</title>
+    <!-- 引入 Tailwind CSS 讓介面變好看 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 JSZip 用來解壓縮 EPUB -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        /* 列印專用樣式：這段魔法能讓網頁變成漂亮的 A4 格式 */
+        @media print {
+            body { background: white; margin: 0; padding: 0; color: black; }
+            #ui-area { display: none !important; } /* 列印時隱藏操作介面 */
+            #print-area { display: block !important; }
+            @page { size: A4 portrait; margin: 20mm 15mm; }
+            img, svg { max-width: 100% !important; height: auto !important; page-break-inside: avoid; margin: 10px auto; display: block; }
+            h1, h2, h3 { page-break-after: avoid; }
+            .chapter-page { page-break-before: always; padding-top: 20px; text-align: justify; line-height: 1.8; font-size: 14pt; }
+        }
+        /* 螢幕預覽樣式 */
+        #print-area { display: none; background: white; padding: 20px; color: black; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans min-h-screen">
+
+    <!-- 操作介面區 -->
+    <div id="ui-area" class="max-w-xl mx-auto p-6 pt-12">
+        <div class="text-center mb-8">
+            <h1 class="text-3xl font-bold text-indigo-600 mb-2">EPUB 轉 PDF</h1>
+            <p class="text-slate-500">純前端運行，支援圖文排版，完美適配手機。</p>
+        </div>
+
+        <div class="bg-white rounded-2xl shadow-md p-6 border border-slate-200 text-center">
+            <div id="upload-box" class="border-2 border-dashed border-indigo-300 bg-indigo-50 rounded-xl p-8 mb-6 relative">
+                <input type="file" id="file-input" accept=".epub" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer">
+                <div class="text-indigo-500 mb-2">
+                    <svg class="w-12 h-12 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                </div>
+                <p id="file-name" class="font-medium text-indigo-700">點擊選擇 EPUB 檔案</p>
+            </div>
+
+            <div id="status-msg" class="text-sm text-slate-500 mb-4 h-6"></div>
+
+            <button id="convert-btn" class="w-full bg-indigo-600 text-white font-bold py-4 rounded-xl shadow-lg opacity-50 cursor-not-allowed" disabled>
+                開始提取內容與圖片
+            </button>
+            
+            <div class="mt-6 text-left bg-yellow-50 p-4 rounded-lg border border-yellow-200 text-sm text-yellow-800">
+                <strong>📱 手機轉存 PDF 密技：</strong><br>
+                1. 處理完成後，畫面會變成純文字閱讀模式。<br>
+                2. 點擊下方的「呼叫列印」按鈕。<br>
+                3. <strong>蘋果 iOS：</strong>在列印預覽畫面，用兩指把畫面<span class="text-red-600 font-bold">「向外撥開 (放大)」</span>，即可點擊分享存成 PDF。<br>
+                4. <strong>安卓 Android：</strong>在印表機選單選擇<span class="text-red-600 font-bold">「另存為 PDF」</span>。
+            </div>
+        </div>
+    </div>
+
+    <!-- 列印閱讀區 (處理完才顯示) -->
+    <div id="print-area">
+        <!-- 這個按鈕在列印時會被 CSS 隱藏 -->
+        <div class="fixed bottom-6 right-6 flex flex-col gap-3" style="z-index: 9999;" data-html2canvas-ignore>
+            <button onclick="window.print()" class="bg-indigo-600 text-white p-4 rounded-full shadow-xl font-bold border-2 border-white">
+                列印 / 存PDF
+            </button>
+            <button onclick="location.reload()" class="bg-slate-700 text-white p-4 rounded-full shadow-xl font-bold border-2 border-white">
+                返回
+            </button>
+        </div>
+        
+        <div id="book-content" class="max-w-4xl mx-auto">
+            <!-- 書本內容會被注入到這裡 -->
+        </div>
+    </div>
+
+    <!-- 核心魔法腳本 -->
+    <script>
+        const fileInput = document.getElementById('file-input');
+        const fileNameDisplay = document.getElementById('file-name');
+        const convertBtn = document.getElementById('convert-btn');
+        const statusMsg = document.getElementById('status-msg');
+        const uiArea = document.getElementById('ui-area');
+        const printArea = document.getElementById('print-area');
+        const bookContent = document.getElementById('book-content');
+
+        let selectedFile = null;
+
+        // 選擇檔案事件
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                selectedFile = e.target.files[0];
+                fileNameDisplay.textContent = `已選擇: ${selectedFile.name}`;
+                convertBtn.disabled = false;
+                convertBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                convertBtn.classList.add('hover:bg-indigo-700', 'active:scale-95');
+                statusMsg.textContent = '準備就緒，請點擊按鈕開始。';
+            }
+        });
+
+        // 解析相對路徑的輔助函數
+        function resolvePath(basePath, relativePath) {
+            const stack = basePath.split('/');
+            stack.pop(); 
+            const parts = relativePath.split('/');
+            for (let part of parts) {
+                if (part === '.' || part === '') continue;
+                if (part === '..') stack.pop();
+                else stack.push(part);
+            }
+            return stack.join('/');
+        }
+
+        // 開始轉換
+        convertBtn.addEventListener('click', async () => {
+            if (!selectedFile || !window.JSZip) return;
+
+            try {
+                convertBtn.disabled = true;
+                convertBtn.textContent = '處理中，請稍候...';
+                statusMsg.textContent = '1/4 正在解壓縮 EPUB...';
+
+                const zip = await JSZip.loadAsync(selectedFile);
+
+                // 找 container.xml
+                const containerFile = zip.file("META-INF/container.xml");
+                if (!containerFile) throw new Error("無效的 EPUB");
+                const containerStr = await containerFile.async("string");
+                
+                // 找 OPF 路徑
+                const opfPathMatch = /full-path="([^"]+)"/.exec(containerStr);
+                if (!opfPathMatch) throw new Error("找不到 OPF");
+                const opfPath = opfPathMatch[1];
+                const basePath = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+
+                statusMsg.textContent = '2/4 正在分析書籍目錄...';
+                const opfStr = await zip.file(opfPath).async("string");
+                
+                // 抓取書名
+                const titleMatch = /<dc:title[^>]*>([^<]+)<\/dc:title>/i.exec(opfStr);
+                const bookTitle = titleMatch ? titleMatch[1] : selectedFile.name;
+
+                // 抓取檔案清單 (Manifest)
+                const manifest = {};
+                const itemRegex = /<item\s+[^>]*id="([^"]+)"[^>]*href="([^"]+)"/g;
+                let itemMatch;
+                while ((itemMatch = itemRegex.exec(opfStr)) !== null) {
+                    manifest[itemMatch[1]] = itemMatch[2];
+                }
+
+                // 抓取閱讀順序 (Spine)
+                const spineIds = [];
+                const itemrefRegex = /<itemref\s+[^>]*idref="([^"]+)"/g;
+                let refMatch;
+                while ((refMatch = itemrefRegex.exec(opfStr)) !== null) {
+                    spineIds.push(refMatch[1]);
+                }
+
+                statusMsg.textContent = `3/4 正在提取圖文內容 (共 ${spineIds.length} 章)...`;
+                
+                let combinedHtml = `
+                    <div style="height: 90vh; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; page-break-after: always;">
+                        <h1 style="font-size: 2.5em; border-bottom: 2px solid black; padding-bottom: 20px;">${bookTitle}</h1>
+                        <p style="color: gray; margin-top: 20px;">純前端 GitHub Pages 生成版</p>
+                    </div>
+                `;
+
+                for (let i = 0; i < spineIds.length; i++) {
+                    const id = spineIds[i];
+                    let href = manifest[id];
+                    if (!href) continue;
+
+                    href = href.split('#')[0];
+                    let chapterPath = basePath + decodeURIComponent(href);
+                    const chapterFile = zip.file(chapterPath);
+
+                    if (chapterFile) {
+                        let htmlStr = await chapterFile.async("string");
+                        
+                        // 擷取 body
+                        const bodyMatch = /<body[^>]*>([\s\S]*?)<\/body>/i.exec(htmlStr);
+                        let bodyContent = bodyMatch ? bodyMatch[1] : htmlStr;
+
+                        // 處理圖片轉 Base64
+                        const imgRegex = /<(img|image)[^>]+(?:src|xlink:href|href)="([^"]+)"/gi;
+                        let imgMatch;
+                        while ((imgMatch = imgRegex.exec(bodyContent)) !== null) {
+                            let imgSrc = imgMatch[2].split('#')[0].split('?')[0];
+                            const imgFullPath = resolvePath(chapterPath, decodeURIComponent(imgSrc));
+                            
+                            const imgFile = zip.file(imgFullPath);
+                            if (imgFile) {
+                                const base64Data = await imgFile.async("base64");
+                                const ext = imgFullPath.split('.').pop().toLowerCase();
+                                const mime = ext === 'png' ? 'image/png' : ext === 'jpeg' || ext === 'jpg' ? 'image/jpeg' : 'image/svg+xml';
+                                const dataUri = `data:${mime};base64,${base64Data}`;
+                                bodyContent = bodyContent.replace(imgMatch[2], dataUri);
+                            }
+                        }
+
+                        // 移除 scripts 避免報錯
+                        bodyContent = bodyContent.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "");
+
+                        combinedHtml += `<div class="chapter-page">${bodyContent}</div>`;
+                    }
+                }
+
+                statusMsg.textContent = '4/4 渲染完成！準備進入列印模式...';
+                
+                // 顯示結果
+                bookContent.innerHTML = combinedHtml;
+                uiArea.classList.add('hidden');
+                printArea.style.display = 'block';
+
+                // 自動觸發列印對話框
+                setTimeout(() => {
+                    window.print();
+                }, 1000);
+
+            } catch (error) {
+                console.error(error);
+                statusMsg.innerHTML = `<span class="text-red-500">錯誤: ${error.message}</span>`;
+                convertBtn.textContent = '重新嘗試';
+                convertBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
+
